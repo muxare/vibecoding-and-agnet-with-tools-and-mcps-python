@@ -1,0 +1,638 @@
+# TeamFlow Simple Queue — Pedagogical Build Roadmap
+
+**Revision 3 — Python + LangGraph**
+
+Python · LangGraph · LangChain · Tools · MCP · Skills · Prompt Engineering
+
+---
+
+## Project Summary
+
+TeamFlow is a research queue backend built in Python with LangGraph. It accepts research prompts, classifies them as simple or complex, decomposes complex ones into subtasks, performs web research, and produces a final report. The interesting part is the architecture: three specialist agents that pass control to each other via LangGraph's handoff primitives, orchestrated by a queue-backed worker.
+
+This project is both a working system and a teaching artifact. Every phase introduces one concept at its simplest form, then layers the next concept on top.
+
+---
+
+## Learning Goals
+
+The four concepts we teach:
+
+- **Tools & function calling** — giving an LLM structured capabilities it can choose to invoke. In this project, tools do two distinct jobs: act on the world (web search, fetch) and act on the graph (handoffs between agents).
+- **MCP (Model Context Protocol)** — exposing tools as a reusable server other agents can consume.
+- **Skills** — packaging domain know-how as a loadable bundle of prompts, examples, and helpers.
+- **Prompt engineering** — designing the instructions, structure, and examples that shape agent behavior. With handoffs, prompts now also specify state machine transitions, not just behavior.
+
+Teaching pattern per phase:
+
+- **Why** — the problem this phase solves.
+- **Concept** — the one idea being introduced.
+- **Todos** — concrete tasks that implement it.
+- **Demo** — what you can show after completing the phase.
+- **Reflection** — what to discuss with learners before moving on.
+
+---
+
+## The Agent Architecture
+
+TeamFlow is built out of the LangGraph patterns documented in `workflows-agents.mdx`. Three specialist agents are nodes in a single `StateGraph`. Control flows between them through the two native mechanisms that doc teaches:
+
+- `add_conditional_edges(source, router_fn, {...})` — a node writes a decision into state, and a small router function maps it to the next node name. This is the **Routing** pattern (workflows-agents.mdx §Routing).
+- `add_conditional_edges(source, assign_workers_fn, [target])` returning a list of `Send(target, substate)` objects — used to fan out complex tasks to child workers. This is the **Orchestrator-worker** pattern with the `Send` API (workflows-agents.mdx §Orchestrator-worker → *Creating workers in LangGraph*).
+
+We stay inside these primitives deliberately. No `Command(goto=...)`, no `create_react_agent`, no custom router class. The framework's vocabulary is sufficient, and keeping to it means every line of TeamFlow code has a direct analogue in the reference doc.
+
+### The three agents
+
+**Triage agent** — classifies a task and, for complex tasks, splits it into subtasks. Uses `with_structured_output` (workflows-agents.mdx §LLMs and augmentations) to produce a routing decision. No external tools. Runs on `claude-sonnet-4-6` by default; can be swapped for a cheaper model once metrics justify it.
+
+**Research agent** — performs web investigation. Is itself a small `StateGraph(MessagesState)` with an `llm_call` node and a `tool_node`, exactly as workflows-agents.mdx §Agents builds it. Tools come from MCP in Phase 7. Runs on `claude-sonnet-4-6`.
+
+**Synthesizer agent** — writes the final report. Has a skill loaded into its system prompt. Is the only node with an edge to `END`. Runs on `claude-sonnet-4-6`.
+
+### How control flows between nodes (Routing pattern)
+
+Each top-level agent is a node that reads state, does work, and returns a state update. A separate router function reads the state and returns the name of the next node. This is the exact shape of workflows-agents.mdx's routing example:
+
+```python
+from typing_extensions import Literal, TypedDict
+from langgraph.graph import StateGraph, START, END
+from langchain.messages import SystemMessage, HumanMessage
+from pydantic import BaseModel, Field
+
+
+class TriageDecision(BaseModel):
+    next_agent: Literal["research", "synth"] = Field(
+        description="Which agent should handle this next."
+    )
+    reasoning: str = Field(description="Why this route was chosen.")
+    context_for_next: str = Field(description="What the next agent needs to know.")
+
+
+triage_llm = llm.with_structured_output(TriageDecision)
+
+
+def triage_node(state: TeamFlowState) -> dict:
+    """Classify the task and write a routing decision into state."""
+    decision = triage_llm.invoke(
+        [
+            SystemMessage(content="Route the task to research or synth."),
+            HumanMessage(content=state["prompt"]),
+        ]
+    )
+    return {
+        "decision": decision.next_agent,
+        "context_for_next": decision.context_for_next,
+        "hops": state["hops"] + 1,
+        "handoff_log": [
+            {
+                "source": "triage",
+                "target": decision.next_agent,
+                "reasoning": decision.reasoning,
+                "hop": state["hops"] + 1,
+            }
+        ],
+    }
+
+
+def route_from_triage(state: TeamFlowState) -> Literal["research_node", "synth_node"]:
+    if state["hops"] >= MAX_HOPS:
+        return "synth_node"
+    return "research_node" if state["decision"] == "research" else "synth_node"
+```
+
+The node writes a decision; the router reads it and returns a string. LangGraph handles dispatch, state merge, and checkpoint. **You do not write a custom router class, an interceptor, or a dispatcher.** Those are the framework.
+
+### Why this fits the pedagogical goal
+
+Once learners understand function calling (Phase 2), routing in Phase 4 is the same idea pointed in a different direction: *a structured model output drives behavior.* Tools direct the model's output into the world; a routing decision directs it at the graph. One mechanism, two uses.
+
+The lesson of Phase 4 is therefore *"how to model a system of agents as a graph of nodes with shared state"* — which is the skill learners will actually use in production.
+
+### The topology
+
+```
+                    ┌─────────────────────────────────┐
+                    │   FastAPI worker dequeues task  │
+                    │   Invokes graph with state      │
+                    └────────────────┬────────────────┘
+                                     │
+                                     ▼
+                            ┌──────────────────┐
+                            │   triage_node    │
+                            │  writes decision │
+                            │  + reasoning     │
+                            └────────┬─────────┘
+                                     │
+                                     ▼
+                          [route_from_triage]
+                            conditional edge
+                              │         │
+                  ┌───────────┘         └─────────┐
+                  ▼                               ▼
+         ┌──────────────────┐          ┌──────────────────┐
+         │  research_node   │          │   synth_node     │
+         │  (sub-StateGraph)│          │  writes report   │
+         │  llm_call ↔ tool │          │  + loaded skill  │
+         │    _node loop    │          └────────┬─────────┘
+         └────────┬─────────┘                   │
+                  │                             ▼
+                  ▼                            END
+         [route_from_research]
+           conditional edge
+                  │
+                  ▼
+              synth_node
+```
+
+For complex tasks, `triage_node` returns a list of `Send("child_graph", substate)` via a conditional edge — the Orchestrator-worker + Send pattern. See Phase 5.
+
+### The state schema
+
+All state that crosses between nodes lives in a single `TypedDict`. This is the contract between agents.
+
+```python
+from typing import TypedDict, Annotated, Literal
+from operator import add
+
+class HandoffLog(TypedDict):
+    source: str
+    target: str
+    reasoning: str
+    hop: int
+
+class TeamFlowState(TypedDict):
+    task_id: str
+    prompt: str
+    kind: Literal["unknown", "simple", "complex"]
+    decision: str                      # latest routing decision
+    context_for_next: str              # what the next agent needs to know
+    findings: list[dict]               # research output
+    report: str                        # synthesizer output
+    hops: int                          # for MAX_HOPS enforcement
+    handoff_log: Annotated[list[HandoffLog], add]  # accumulating history (reducer)
+    skill_name: str | None             # which skill the synth should use
+```
+
+Note the `Annotated[list, add]` pattern — identical to `completed_sections` in workflows-agents.mdx's orchestrator-worker example. The `add` reducer lets parallel workers append without clobbering each other.
+
+### The wrapping logic (what you still own)
+
+LangGraph handles routing, state merging, and checkpointing. You still own:
+
+- **MAX_HOPS enforcement**: the router functions check `state["hops"] >= MAX_HOPS` and return `"synth_node"` to force finalization. Synth never re-routes, so this terminates.
+- **Budget enforcement**: wrap each node with a token/time budget check, or enforce in the worker that invokes the graph.
+- **Tracing**: LangSmith gives you most of this; you append to `handoff_log` as an ordinary state update.
+- **Cancellation**: via `RunnableConfig` cancellation tokens passed into `graph.invoke(..., config=...)`.
+- **Terminal edge discipline**: only `synth_node` has an edge to `END`. Router functions can point to `synth_node` but never directly to `END` — write a test for this.
+
+### Rules of the road
+
+- **Only the synthesizer has an edge to END.** Routers may send work to synth, but nobody else terminates the graph. This preserves quality — no shortcuts around the report.
+- **All cross-node state lives in the state schema.** If an agent needs to tell the next one something, it goes in the state. No side channels, no globals.
+- **MAX_HOPS is non-negotiable.** Start at 6. Enforce inside every router function.
+- **Budgets live outside the node functions.** Token count, tool-call count, wall time — enforced by decorators or the calling worker, not inside nodes.
+- **Log every handoff to `handoff_log`.** Source, target, reasoning, hop. Most interesting demo artifact the project produces.
+
+---
+
+## Roadmap at a Glance
+
+| Phase | Focus                | New concept                   | What learners see                                                     |
+| ----- | -------------------- | ----------------------------- | --------------------------------------------------------------------- |
+| 0     | Foundation           | Project shape                 | A running FastAPI that echoes prompts back                            |
+| 1     | First agent          | Prompt engineering (basics)   | Triage node classifies simple vs complex                              |
+| 2     | First external tool  | Tools & function calling      | Research agent chooses to call web search                             |
+| 3     | Structured prompts   | Prompt engineering (advanced) | Same agent, three prompt versions, visibly different results          |
+| 4     | LangGraph routing    | Modeling agents as a graph    | Agents pass control via `add_conditional_edges`; full graph runs      |
+| 5     | Orchestrator-worker  | Decomposition via `Send` API  | Complex task splits via Send API, children run, parent rolls up       |
+| 6     | Skills               | Portable expertise            | Swapping a skill changes report style with no code change             |
+| 7     | MCP                  | Model Context Protocol        | Research tools run as an external MCP server                          |
+| 8     | Quality              | Evals & observability         | LangSmith traces, handoff graphs, eval scores                         |
+| 9     | Deploy               | Ship it                       | Public URL, CI/CD with eval gates, one-command teardown               |
+
+---
+
+## Phase 0 — Foundation
+
+**Concept introduced:** Project shape (no AI yet)
+
+### Why
+
+Before we wire up an LLM, we need somewhere for it to live. This phase gives learners a bare-bones API and a mental model of the codebase so later AI concepts drop into familiar slots.
+
+### Todos
+
+- [ ] Scaffold project with `uv` (Python 3.12+)
+- [ ] Project layout: `src/teamflow/api`, `src/teamflow/core`, `src/teamflow/agents`, `src/teamflow/orchestration`, `src/teamflow/infrastructure`, `tests`
+- [ ] Add dependencies: `fastapi`, `uvicorn`, `langgraph`, `langchain`, `langchain-anthropic`, `pydantic`, `structlog` — matches the `pip install langchain_core langchain-anthropic langgraph` stack from workflows-agents.mdx §Setup. Do not use LangGraph yet.
+- [ ] Default model: `claude-sonnet-4-6` (same as workflows-agents.mdx throughout). Smaller/cheaper models are a later optimization, not a starting choice.
+- [ ] `POST /tasks` that stores a prompt and returns an ID (no AI)
+- [ ] `GET /tasks/{id}` that returns the stored prompt
+- [ ] In-memory repository behind a `TaskRepository` protocol
+- [ ] `structlog` configured with JSON output and a `task_id` bound context
+- [ ] `.env` + `python-dotenv` for API keys you will need soon
+- [ ] `ruff` + `mypy` + `pytest` configured; CI-ready
+
+### Demo
+
+Send a POST, get an ID, GET it back. Boring — and that is the point.
+
+### Reflection
+
+> "Notice there is no intelligence here yet. Everything that follows is added at specific, named places in this skeleton. The shape of the app does not change — only what happens inside one function."
+
+---
+
+## Phase 1 — First Agent
+
+**Concept introduced:** Prompt engineering — basics
+
+### Why
+
+The simplest useful thing an LLM can do in this system is classify a task. No tools, no handoffs, no orchestration — just prompt in, structured answer out. This is the cleanest possible lesson on how wording shapes output, and it introduces the shape of a LangChain model call with structured output.
+
+### Concept
+
+A prompt is not a question, it is a specification. Learners see how role framing, explicit output schemas, and examples turn unreliable prose into reliable JSON. They also see the simplest possible LLM call — a chat model, a prompt, and a Pydantic schema for the output.
+
+This is the `with_structured_output` pattern from workflows-agents.mdx §LLMs and augmentations, used in isolation before we compose it into a graph.
+
+### Todos
+
+- [ ] Build `triage()` function using `ChatAnthropic` (or equivalent) + `.with_structured_output(TriageResult)`
+- [ ] Define `TriageResult` as a Pydantic model with `kind: Literal["simple", "complex"]`
+- [ ] Write v1 prompt: a single sentence — "Is this simple or complex?"
+- [ ] Observe messy output; commit it as teaching evidence
+- [ ] Iterate to v2: add role ("You classify research tasks")
+- [ ] Iterate to v3: add explicit JSON schema in the prompt (even though structured_output enforces it — the prompt helps)
+- [ ] Iterate to v4: add two few-shot examples (one simple, one complex)
+- [ ] Store each prompt version as a separate `.md` file in `prompts/triage/`
+- [ ] Wire `triage()` into `POST /tasks`; store `kind` on the task
+- [ ] No LangGraph yet — just a plain function call
+
+### Demo
+
+Submit "what is the current price of gold" (simple) and "analyze the EV market in Europe" (complex). Show the v1 → v4 evolution side by side — same model, same input, dramatically different reliability.
+
+### Reflection
+
+> "Every prompt version cost us nothing to write, but each one made the system more reliable. Before reaching for fine-tuning or a bigger model, exhaust this lever first."
+
+---
+
+## Phase 2 — First External Tool
+
+**Concept introduced:** Tools & function calling
+
+### Why
+
+Classification is pure reasoning. Research requires reaching into the world. This phase introduces the single most important pattern in modern agent design: giving the model capabilities and letting it decide when to use them. We introduce it here on a single agent, with no graph yet — so the tool-calling loop is visible in isolation.
+
+### Concept
+
+A tool is a function with a name, a docstring, and a typed signature. The model does not know how to search the web — it knows how to ask the runtime to search the web. The runtime executes and returns results. The loop continues until the model is done. The docstring is a prompt; the parameter types are a schema. Both shape behavior.
+
+We build the agent **explicitly** — `llm.bind_tools(...)` plus a two-node `StateGraph(MessagesState)` with a conditional edge — exactly as workflows-agents.mdx §Agents does it. No `create_react_agent` shortcut; the loop stays visible.
+
+### Todos
+
+- [ ] Create `web_search_tool` and `web_fetch_tool` using `from langchain.tools import tool` (matches workflows-agents.mdx §Agents)
+- [ ] Write crisp docstrings on each — these are the prompts the model reads
+- [ ] Pick one search provider behind a `SearchProvider` protocol (Brave, Tavily, or Exa)
+- [ ] Build `tools_by_name = {t.name: t for t in tools}` and `llm_with_tools = llm.bind_tools(tools)`
+- [ ] Build the research agent as a `StateGraph(MessagesState)` with:
+  - [ ] `llm_call` node that invokes `llm_with_tools` with a system prompt + messages
+  - [ ] `tool_node` that executes each `tool_call` and appends a `ToolMessage`
+  - [ ] `should_continue` conditional edge router: go to `tool_node` if `last_message.tool_calls`, else `END`
+  - [ ] `add_edge("tool_node", "llm_call")` to close the loop
+- [ ] Log every tool call with arguments and result size (LangSmith will do this, but explicit logging is teachable)
+- [ ] For now: wire the flow in plain Python — if triage returns simple, invoke the research agent directly
+- [ ] Add a tool-call budget (max *N* iterations) via `graph.invoke(..., config={"recursion_limit": N})`
+- [ ] Return findings as a list of structured `Finding` Pydantic records: `{ claim, source_url, confidence }`
+
+### Demo
+
+Submit "what is the current price of gold". Show the trace: model calls `web_search`, reads results, calls `web_fetch` on one URL, produces the answer with citation. Then change the `web_search` docstring from "Search the web" to "Search only academic papers" and rerun — watch behavior change with zero code change.
+
+### Reflection
+
+> "The tool docstring is a prompt. You just wrote instructions for a stranger. If the docstring is vague, the model will use the tool vaguely. Treat every `@tool` docstring as a public API written for an LLM reader. Remember this — in Phase 4 we'll use the same idea for something very different: control flow."
+
+---
+
+## Phase 3 — Structured Prompts
+
+**Concept introduced:** Prompt engineering — advanced patterns
+
+### Why
+
+With a working agent and real tools, prompt changes now produce visible downstream effects. This phase teaches the named patterns learners will reach for again and again — and crucially, establishes the prompt infrastructure before Phase 4 multiplies the number of prompts we need to maintain.
+
+### Concept
+
+Prompt engineering is not folklore. There are reusable patterns: system/user separation, XML delimiters for structured input, chain-of-thought triggers, output format contracts, and negative examples. We apply each one deliberately and measure the difference.
+
+### Todos
+
+- [ ] Keep prompts as `.md` files with YAML frontmatter (`name`, `version`, `model`, `description`)
+- [ ] Build a `load_prompt(name, version)` helper that reads frontmatter + body
+- [ ] Version prompts as separate files (`triage.v1.md`, `triage.v2.md`, ...) and keep old versions
+- [ ] Introduce XML-delimited input sections: `<task>`, `<constraints>`, `<examples>`
+- [ ] Add a "think step by step" block to the research prompt and measure quality change
+- [ ] Enforce output schemas with Pydantic + `.with_structured_output()`
+- [ ] Add negative examples — "do NOT return prose, do NOT include URLs without citation"
+- [ ] Write a prompt style guide in `docs/prompts/README.md`
+- [ ] Unit test: rendered prompt matches snapshot for a given input
+
+### Demo
+
+Run the same task through v1 and v4 prompts of the research agent. Show a table of: tokens used, tool calls made, citations returned, hallucinations caught. Same model, same tools — prompt alone moves every metric.
+
+### Reflection
+
+> "Structure beats cleverness. A boring prompt with a clear schema outperforms a clever prompt with vague instructions, every time."
+
+---
+
+## Phase 4 — LangGraph Routing: Modeling Agents as a Graph
+
+**Concept introduced:** Agents as nodes in a state graph, handoffs as conditional edges
+
+### Why
+
+We have two agents that each do one job well, wired together by ad-hoc Python code. In most architectures we would now write a custom orchestrator. LangGraph gives us a better model: agents are nodes in a `StateGraph`, and handoffs are `add_conditional_edges` routing off a structured model output. This is the headline phase — the moment where we move from "two functions that talk to each other" to "a graph of agents with shared state and explicit transitions" — and it's the **Routing** pattern documented in workflows-agents.mdx §Routing, scaled up.
+
+### Concept
+
+A LangGraph node is a function that takes the current state and returns a dict of state updates. A separate **conditional edge** — a small router function registered with `add_conditional_edges(source, router_fn, {...})` — reads the state and returns the name of the next node. This is the **Routing** pattern from workflows-agents.mdx §Routing, applied to a larger cast of specialist nodes.
+
+Control flow is data the model produces (via `with_structured_output`), interpreted by a one-line router function. That's the entire handoff mechanism.
+
+Where a hand-rolled architecture would need `HandoffRequest`, `HandoffPlugin`, `AgentRouter`, and `HandoffInterceptor` classes, here we learn to *model* the same pattern using the framework's vocabulary: nodes, edges, conditional edges. The lesson shifts from "build it" to "model it" — the more transferable skill.
+
+### Todos
+
+- [ ] Define `TeamFlowState` as a `TypedDict` with all cross-agent fields (see the Architecture section above)
+- [ ] Build `triage_node(state) -> dict`: calls triage LLM with `with_structured_output(TriageDecision)`, writes decision + reasoning + handoff_log entry to state
+- [ ] Build `research_node(state) -> dict`: invokes the research sub-graph from Phase 2, writes findings + a decision field (e.g. `"synth"` or `"triage"` for re-scoping) back to state
+- [ ] Build `synth_node(state) -> dict`: writes the final report to state (no decision needed — its only edge is to `END`)
+- [ ] Write router functions:
+  - [ ] `route_from_triage(state) -> Literal["research_node", "synth_node"]` — honours `MAX_HOPS`
+  - [ ] `route_from_research(state) -> Literal["synth_node", "triage_node"]` — honours `MAX_HOPS`
+- [ ] Assemble the graph:
+  ```python
+  builder = StateGraph(TeamFlowState)
+  builder.add_node("triage_node", triage_node)
+  builder.add_node("research_node", research_node)
+  builder.add_node("synth_node", synth_node)
+  builder.add_edge(START, "triage_node")
+  builder.add_conditional_edges("triage_node", route_from_triage,
+      {"research_node": "research_node", "synth_node": "synth_node"})
+  builder.add_conditional_edges("research_node", route_from_research,
+      {"synth_node": "synth_node", "triage_node": "triage_node"})
+  builder.add_edge("synth_node", END)
+  graph = builder.compile()
+  ```
+- [ ] Enforce: `synth_node` is the only node with an edge to `END` (write a test that asserts this on the compiled graph)
+- [ ] Update prompts: each node's structured-output schema teaches the model which targets are valid
+- [ ] Append to `state["handoff_log"]` on every transition — the `Annotated[list, add]` reducer handles merging
+- [ ] Configure a `MemorySaver` checkpointer for now; durable storage lands in Phase 5
+- [ ] Expose the handoff log via `GET /tasks/{id}/trace`
+- [ ] Visualize the graph with `display(Image(graph.get_graph().draw_mermaid_png()))` (exactly as workflows-agents.mdx shows) and commit the diagram
+
+### Demo
+
+Submit a simple task. Watch the trace: triage writes `decision="research"`, the conditional edge dispatches to `research_node`, research calls `web_search`, writes `decision="synth"`, the next conditional edge routes to `synth_node`, which writes the report and terminates at `END`. Now edit the research prompt to be more cautious. Submit the same task. Watch research write `decision="triage"` mid-task because it decided the scope was wrong, and the conditional edge loops back. Same code, different prompt, different graph traversal.
+
+Open LangSmith to see the full nested trace. This is the pedagogical payoff.
+
+### Reflection
+
+> "In Phase 2 we used function calling to give the model capabilities in the world. Here, a structured model output drives a conditional edge and selects the next node. Same pattern — the model's output causing something to happen — pointed in two different directions."
+
+> "Notice what we did NOT build: a router class, a dispatcher, a state merger. LangGraph gave us those via `add_conditional_edges` and the state reducer annotations. What we DID build: the state schema, the node functions, the Pydantic decision schemas, and the prompts that teach each agent when to route where. The framework owns mechanism; we own meaning."
+
+---
+
+## Phase 5 — The Queue: Decomposition & Synthesis
+
+**Concept introduced:** Recursive task breakdown via the Send API
+
+### Why
+
+So far we have handled simple tasks end-to-end. Complex tasks need decomposition: triage splits them into children, each child runs through the full graph, and a parent synth rolls up their reports. This is the **Orchestrator-worker** pattern from workflows-agents.mdx §Orchestrator-worker — specifically the *Creating workers in LangGraph* section, where `Send` dynamically creates worker nodes.
+
+### Concept
+
+The `Send` API (`from langgraph.types import Send`) lets a conditional edge return a list of `Send(node_name, substate)` objects. LangGraph dispatches one instance of the target node per `Send`, each with its own state slice; their outputs merge back into the parent state via reducer annotations (`Annotated[list, operator.add]` — exactly the `completed_sections` pattern in workflows-agents.mdx).
+
+This is the **parallelization** pattern (workflows-agents.mdx §Parallelization) generalized to dynamic fan-out. We still add a FastAPI worker on top for backpressure and API responsiveness, but the parallel execution itself is the framework.
+
+### Todos
+
+- [ ] Extend the triage decision schema with a `subtasks: list[str]` field for complex tasks
+- [ ] Add `assign_workers(state) -> list[Send]` conditional-edge router on `triage_node`:
+  ```python
+  from langgraph.types import Send
+
+  def assign_workers(state: TeamFlowState):
+      return [
+          Send("child_graph", {"prompt": s, "task_id": f"{state['task_id']}:{i}", "hops": 0})
+          for i, s in enumerate(state["subtasks"])
+      ]
+  ```
+- [ ] Register it with `builder.add_conditional_edges("triage_node", assign_workers, ["child_graph"])` when the decision is "split"
+- [ ] Reuse the Phase 4 graph as `child_graph` — same three nodes, invoked per subtask
+- [ ] Add `child_reports: Annotated[list[str], operator.add]` to `TeamFlowState` — workers append via the reducer
+- [ ] Build a `synth_parent_node` that runs after all children complete (LangGraph waits for all `Send`s by default), joining their reports
+- [ ] Depth cap (max 2 levels) — enforce in `triage_node` by reading a `depth` field in state
+- [ ] Partial-failure policy: on child failure, write an error sentinel into `child_reports` and let synth proceed with what exists
+- [ ] Build a FastAPI async worker that invokes the graph and streams `graph.astream(...)` events
+- [ ] SSE endpoint `GET /tasks/{id}/events` streaming status + handoff transitions
+- [ ] Visualize the full task tree with `get_graph().draw_mermaid_png()` — same helper used throughout workflows-agents.mdx
+
+### Demo
+
+Submit "analyze the EV market in Europe". Open the SSE stream. Watch triage split into four subtasks. Watch each child run its own triage → research → synth chain concurrently. Watch the parent synth node wake up and run over the four child reports. Open the tree endpoint to see the full graph.
+
+### Reflection
+
+> "The 'queue' in TeamFlow turned out to be partly the LangGraph runtime itself. `Send` + reducer annotations + async workers give us durable parallel execution with almost no custom code. This is exactly the pattern workflows-agents.mdx documents under Orchestrator-worker — we just plugged our three-agent graph in as the worker subgraph. The lesson: when a framework's primitive matches your need, lean into it. The code you don't write is code you don't have to debug."
+
+---
+
+## Phase 6 — Skills: Portable Expertise
+
+**Concept introduced:** Domain-shaped output via loadable bundles
+
+### Why
+
+The synthesizer writes generic reports. A finance analyst and a legal researcher produce very different deliverables from the same findings. Skills let us package that expertise as swappable bundles — and crucially, onboard a new domain expert without touching Python code.
+
+### Concept
+
+A skill is a folder containing a `SKILL.md` (instructions), optional few-shot example reports, optional helper functions, and optional templates. The agent loads skills dynamically based on the task. Skills are the difference between "an LLM with tools" and "an LLM with a profession".
+
+### Todos
+
+- [ ] Define the skill folder contract: `SKILL.md` with YAML frontmatter (`name`, `description`, `trigger_keywords`)
+- [ ] Build a `SkillLoader` that scans `/skills` at startup and caches skills
+- [ ] Build a `SkillSelector` that matches a task to the best skill (LLM call with structured output)
+- [ ] Inject selected skill's `SKILL.md` into `synth_node`'s system prompt
+- [ ] Author skill: `finance-analyst` (citations-heavy, tables, exec summary on top)
+- [ ] Author skill: `competitive-analysis` (positioning grid, SWOT, recommendations)
+- [ ] Author skill: `academic-review` (methodology section, literature grounding)
+- [ ] Skill can include example reports — few-shot by file reference, not inline
+- [ ] Let users force a skill via the `POST /tasks` body (`skill_name` field)
+- [ ] Make skill selection itself a state field — `triage_node` picks the skill when splitting
+- [ ] Add `skill_name` to `TeamFlowState` so it flows through the graph to synth
+
+### Demo
+
+Take one finished task's findings. Re-synthesize three times with three skills loaded (by overriding `skill_name` in state). Same data, three profession-shaped reports. The wow moment: add a new skill folder on disk, restart, it works — no code change. Then show triage autonomously selecting the right skill based on task wording.
+
+### Reflection
+
+> "A skill is a prompt with structure around it. Once you have the loader, you can onboard a new domain expert by writing Markdown, not Python. That is a leverage point."
+
+---
+
+## Phase 7 — MCP: Tools as Infrastructure
+
+**Concept introduced:** Model Context Protocol
+
+### Why
+
+Our external tools live inside the API. That works, but it does not compose. MCP is the protocol that lets tools run as separate processes that any MCP-aware agent can consume. It is how we turn our web search tools from a library into infrastructure. Note we do this AFTER handoffs — so learners can see that external tools and graph edges are different kinds of "outputs the model produces," and that only external tools cross process boundaries.
+
+### Concept
+
+MCP separates tool definition from tool caller. A server advertises tools over a standard protocol. Any client — Claude Desktop, our graph, someone else's agent — can connect and use them. Same tools, many consumers, one source of truth. Graph edges stay in-process (they belong to LangGraph); world-facing tools move to MCP.
+
+### Todos
+
+- [ ] Extract `web_search_tool` and `web_fetch_tool` into a standalone MCP server using the `mcp` Python package
+- [ ] Expose the tools over MCP stdio transport
+- [ ] Add `langchain-mcp-adapters` dependency; load MCP tools into the research agent
+- [ ] Prove parity: existing tests pass with MCP-backed tools
+- [ ] Verify graph edges stay in-process — `Command(goto=...)` is NOT externalized
+- [ ] Author a second MCP server: `internal-docs` (searches a local corpus)
+- [ ] Show the research agent using both MCP servers in one task
+- [ ] Test the MCP server from Claude Desktop to prove it is truly portable
+- [ ] Document the tool contract — name, description, schema — as public API
+- [ ] Graceful degradation when an MCP server is unreachable (agent continues with reduced toolkit)
+
+### Demo
+
+Run a task. Kill the MCP server mid-task. Watch graceful degradation. Restart it. Connect the same server from Claude Desktop and call the tool manually — same server, different client. This is the "aha" moment for MCP: tools outlive the app they were born in.
+
+### Reflection
+
+> "A tool inside your app serves one agent. A tool on MCP serves every agent you and your team will ever build. The cost to convert is small; the leverage compounds."
+
+> "Note what did NOT move to MCP: the graph edges (`Command(goto=...)`). Those belong to LangGraph because they reference in-process state and the runtime. The distinction between ambient world-facing tools and process-internal control flow is a real architectural line."
+
+---
+
+## Phase 8 — Quality: Evals & Observability
+
+**Concept introduced:** Making the system legible
+
+### Why
+
+The system works. Now we need to know how well, at what cost, and how to keep it that way as prompts and models change. LangSmith gives us most of the observability story for free; we still need to build evals and custom dashboards.
+
+### Todos
+
+- [ ] Wire LangSmith via `LANGSMITH_API_KEY` — traces for every graph run appear automatically
+- [ ] Custom LangSmith tags per node so filters work (`triage`, `research`, `synth`)
+- [ ] Metrics: queue depth, task duration, tokens per agent, tool call counts, hops per task (via OpenTelemetry or Prometheus)
+- [ ] Handoff graph visualization per task — render from `state["handoff_log"]`
+- [ ] Cost dashboard: tokens × model price rolled up per root task
+- [ ] Eval harness with `langsmith.evaluate`: fixed dataset, scored with a judge model
+- [ ] Snapshot tests for prompt outputs — catches prompt regressions
+- [ ] Eval handoff behavior specifically: does triage correctly route borderline tasks?
+- [ ] **Optional — inline evaluator-optimizer loop:** wrap `synth_node` with the pattern from workflows-agents.mdx §Evaluator-optimizer — a second LLM grades the draft report against criteria, and feedback loops back into synth up to N times. This is the same `llm_call_generator` ↔ `llm_call_evaluator` graph applied to our synthesizer.
+- [ ] Load test: queue 100 concurrent root tasks, measure throughput and failure rate
+- [ ] Alert when re-triage rate exceeds ~5% — signals poor initial decomposition
+- [ ] Prompt safety checks: length caps, disallowed-content filters
+- [ ] Health checks: `/health/live`, `/health/ready` (DB + MCP servers reachable)
+
+### Demo
+
+Open LangSmith. Submit three tasks of different complexity. Show the full nested trace for each — every agent call, every tool call, every handoff. Change a prompt. Run the eval suite. Watch scores move. Merge only if eval scores improve — this is the start of a real prompt development workflow.
+
+### Reflection
+
+> "Without evals, prompt engineering is guessing. With evals, it is engineering. LangSmith's traces give us the 'how' for free; evals give us the 'how well.' Together they turn agent development into a feedback loop instead of a guessing game."
+
+---
+
+## Phase 9 — Deploy: Ship It
+
+**Concept introduced:** Production reality
+
+### Why
+
+A demo on localhost teaches nothing about running LLM systems in production. This phase ships the system somewhere real and automates everything around it.
+
+### Todos
+
+- [ ] Multi-stage Dockerfile for the FastAPI app (with `uv` for fast installs)
+- [ ] Separate container for each MCP server
+- [ ] `docker-compose.yml` for local dev (api + postgres + mcp servers)
+- [ ] Pulumi or Terraform stack (target your preferred cloud: Fly.io, Railway, Azure Container Apps, GCP Cloud Run)
+- [ ] Managed Postgres for the checkpointer and task repository
+- [ ] GitHub Actions: lint → test → eval → container build → deploy
+- [ ] Eval gate: block merge if eval scores regress beyond threshold
+- [ ] Secrets in the platform's secret store, never in env vars committed to git
+- [ ] Environment promotion: dev → staging → prod with manual approval on prod
+- [ ] One-command teardown script for learners who fork the repo
+- [ ] Runbook: common failures and recovery steps (including graph loops and checkpointer corruption)
+
+### Demo
+
+Push a prompt change to a PR. Watch CI run tests + evals. Merge. Watch it deploy to staging. Promote to prod. Submit a real task against the public URL.
+
+### Reflection
+
+> "The interesting work in LLM systems is not the model call. It is everything around the model call that makes it safe, cheap, observable, and improvable. You just built all of that — and the agents decide their own flow inside the walls you built."
+
+---
+
+## How to Teach This
+
+### Pacing
+
+Each phase is roughly one workshop session (2–3 hours) or one week of self-paced work. Phases 1, 2, 4, and 7 are the four "concept" peaks — budget extra discussion time for those. Phase 4 (routing and LangGraph) is the headline — consider splitting it into two sessions if the group is new to agent patterns or to LangGraph specifically. Learners should have workflows-agents.mdx open alongside the code during Phases 1–5; every pattern we use has a direct analogue there.
+
+### What to preserve as teaching artifacts
+
+- Every prompt version (v1 → vN) kept in the repo, never deleted.
+- Bad-output examples from Phase 1, committed with a "before" label.
+- Trace captures from Phase 2 showing tool-call loops in action.
+- Graph visualizations from Phase 4 — the headline visual.
+- LangSmith trace links embedded in phase docs.
+- The eval suite results over time — a visible quality graph.
+
+### The arc learners walk away with
+
+They start thinking "LLMs answer questions". They end thinking in terms of prompts as specifications, tools as structured outputs the model produces (some acting on the world, some acting on control flow), skills as packaged expertise, MCP as the connective tissue between systems, and evals as the only honest way to know any of it is working. LangGraph becomes a familiar mental model — a state graph where nodes are agents and edges are decisions — rather than a framework they memorized.
+
+That mental model transfers to every agent project they will ever touch, regardless of framework or language.
+
+---
+
+## Notes for Implementation (for Claude Code)
+
+A few things worth flagging before starting:
+
+- `MAX_HOPS = 6` is a starting guess. Tune once real traces exist.
+- The re-triage rate threshold of ~5% is also a guess; may be more useful as a relative metric than an absolute gate.
+- Phase 6's todo about triage selecting the skill autonomously is ambitious — can be deferred to a Phase 6.5 if it feels like too much for one phase.
+- Start every phase by committing a `PHASE_N.md` in the repo with the "Why/Concept/Demo/Reflection" sections copied in — it doubles as a living design doc for that phase.
+- Keep old prompt versions in the repo forever. They are the teaching artifact.
+- LangGraph is evolving fast — pin versions and note the version in each phase's doc. What worked in 0.2.x may be different in 0.3.x.
+- Use `langgraph dev` for local graph inspection during Phase 4+ development; it's the best way to see what's actually happening.
+- **API surface is deliberately constrained.** We use only the LangGraph primitives documented in `docs/workflows-agents.mdx`: `StateGraph`, `START`, `END`, `MessagesState`, `add_node`, `add_edge`, `add_conditional_edges`, `with_structured_output`, `bind_tools`, `@tool`, and `Send`. We intentionally avoid `Command(goto=...)` and `create_react_agent` — their absence forces learners to see the underlying routing mechanism (conditional edges on structured output) and the underlying agent loop (`llm_call` ↔ `tool_node`). If you later reach for those prebuilts, do so knowingly.
