@@ -27,6 +27,16 @@ class StubResearch:
         return list(self.findings)
 
 
+class StubSynth:
+    def __init__(self, report: str = "report-body") -> None:
+        self.report = report
+        self.calls: list[tuple[str, list[Finding]]] = []
+
+    def __call__(self, prompt: str, findings: list[Finding]) -> str:
+        self.calls.append((prompt, list(findings)))
+        return self.report
+
+
 @pytest.fixture
 def triage() -> StubTriage:
     return StubTriage()
@@ -46,10 +56,16 @@ def research() -> StubResearch:
 
 
 @pytest.fixture
-def client(triage: StubTriage, research: StubResearch) -> TestClient:
+def synth() -> StubSynth:
+    return StubSynth()
+
+
+@pytest.fixture
+def client(triage: StubTriage, research: StubResearch, synth: StubSynth) -> TestClient:
     app = create_app(
         repository=InMemoryTaskRepository(),
         triage=triage,
         research=research,
+        synth=synth,
     )
     return TestClient(app)

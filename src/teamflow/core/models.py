@@ -15,9 +15,18 @@ class Finding(BaseModel):
     )
 
 
+class HandoffEntry(BaseModel):
+    source: str
+    target: str
+    reasoning: str
+    hop: int
+
+
 class Task(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     prompt: str
     kind: TaskKind = "unknown"
     findings: list[Finding] = Field(default_factory=list)
+    report: str = ""
+    handoff_log: list[HandoffEntry] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))

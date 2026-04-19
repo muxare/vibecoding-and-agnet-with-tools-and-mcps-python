@@ -13,6 +13,7 @@ from teamflow.core.prompts import Prompt, load_prompt
         ("triage", "v5"),
         ("research", "v1"),
         ("research", "v2"),
+        ("synth", "v1"),
     ],
 )
 def test_prompt_loads_with_frontmatter(name: str, version: str) -> None:

@@ -1,12 +1,16 @@
+from typing import Any
+
 from fastapi import FastAPI
 
 from teamflow.agents.research import LangGraphResearchAgent, ResearchAgent
+from teamflow.agents.synth import AnthropicSynth, Synth
 from teamflow.agents.tools import TavilySearchProvider
 from teamflow.agents.triage import AnthropicTriage, Triage
 from teamflow.api.routes import router as tasks_router
 from teamflow.core.config import settings
 from teamflow.infrastructure.logging import configure_logging
 from teamflow.infrastructure.repository import InMemoryTaskRepository, TaskRepository
+from teamflow.orchestration.graph import build_graph
 
 
 class _LazyResearch:
@@ -33,12 +37,23 @@ def create_app(
     repository: TaskRepository | None = None,
     triage: Triage | None = None,
     research: ResearchAgent | None = None,
+    synth: Synth | None = None,
+    graph: Any | None = None,
 ) -> FastAPI:
     configure_logging()
     app = FastAPI(title="TeamFlow", version="0.1.0")
     app.state.repository = repository or InMemoryTaskRepository()
-    app.state.triage = triage or AnthropicTriage()
-    app.state.research = research or _LazyResearch()
+    resolved_triage = triage or AnthropicTriage()
+    resolved_research = research or _LazyResearch()
+    resolved_synth = synth or AnthropicSynth()
+    app.state.triage = resolved_triage
+    app.state.research = resolved_research
+    app.state.synth = resolved_synth
+    app.state.graph = graph or build_graph(
+        triage=resolved_triage,
+        research=resolved_research,
+        synth=resolved_synth,
+    )
     app.include_router(tasks_router)
     return app
 
