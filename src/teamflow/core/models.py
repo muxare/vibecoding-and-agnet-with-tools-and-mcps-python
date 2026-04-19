@@ -7,8 +7,17 @@ from pydantic import BaseModel, Field
 TaskKind = Literal["unknown", "simple", "complex"]
 
 
+class Finding(BaseModel):
+    claim: str = Field(description="A single factual claim drawn from the sources.")
+    source_url: str = Field(description="URL of the page that supports this claim.")
+    confidence: float = Field(
+        ge=0.0, le=1.0, description="0–1 estimate of how well sources support the claim."
+    )
+
+
 class Task(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     prompt: str
     kind: TaskKind = "unknown"
+    findings: list[Finding] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))

@@ -3,6 +3,7 @@ from fastapi.testclient import TestClient
 
 from teamflow.agents.triage import TriageKind, TriageResult
 from teamflow.api.app import create_app
+from teamflow.core.models import Finding
 from teamflow.infrastructure.repository import InMemoryTaskRepository
 
 
@@ -16,12 +17,39 @@ class StubTriage:
         return TriageResult(kind=self.kind)
 
 
+class StubResearch:
+    def __init__(self, findings: list[Finding] | None = None) -> None:
+        self.findings: list[Finding] = findings or []
+        self.calls: list[str] = []
+
+    def __call__(self, prompt: str) -> list[Finding]:
+        self.calls.append(prompt)
+        return list(self.findings)
+
+
 @pytest.fixture
 def triage() -> StubTriage:
     return StubTriage()
 
 
 @pytest.fixture
-def client(triage: StubTriage) -> TestClient:
-    app = create_app(repository=InMemoryTaskRepository(), triage=triage)
+def research() -> StubResearch:
+    return StubResearch(
+        findings=[
+            Finding(
+                claim="Gold spot price was $2,300/oz on 2025-01-01.",
+                source_url="https://example.com/gold",
+                confidence=0.8,
+            )
+        ]
+    )
+
+
+@pytest.fixture
+def client(triage: StubTriage, research: StubResearch) -> TestClient:
+    app = create_app(
+        repository=InMemoryTaskRepository(),
+        triage=triage,
+        research=research,
+    )
     return TestClient(app)

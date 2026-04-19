@@ -3,6 +3,7 @@ from uuid import UUID
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
+from teamflow.agents.research import ResearchAgent
 from teamflow.agents.triage import Triage
 from teamflow.api.schemas import CreateTaskRequest, TaskResponse
 from teamflow.core.models import Task
@@ -22,19 +23,31 @@ def get_triage(request: Request) -> Triage:
     return request.app.state.triage  # type: ignore[no-any-return]
 
 
+def get_research(request: Request) -> ResearchAgent:
+    return request.app.state.research  # type: ignore[no-any-return]
+
+
 @router.post("", status_code=status.HTTP_201_CREATED, response_model=TaskResponse)
 def create_task(
     payload: CreateTaskRequest,
     repo: TaskRepository = Depends(get_repository),
     triage: Triage = Depends(get_triage),
+    research: ResearchAgent = Depends(get_research),
 ) -> Task:
     task = Task(prompt=payload.prompt)
     bind_task_id(str(task.id))
     try:
         decision = triage(payload.prompt)
         task.kind = decision.kind
+        if task.kind == "simple":
+            task.findings = research(payload.prompt)
         repo.add(task)
-        log.info("task_created", prompt_length=len(task.prompt), kind=task.kind)
+        log.info(
+            "task_created",
+            prompt_length=len(task.prompt),
+            kind=task.kind,
+            findings=len(task.findings),
+        )
         return task
     finally:
         clear_task_context()
