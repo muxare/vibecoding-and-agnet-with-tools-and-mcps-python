@@ -1,4 +1,3 @@
-from pathlib import Path
 from typing import Literal, Protocol, cast
 
 from langchain_anthropic import ChatAnthropic
@@ -6,11 +5,11 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field, SecretStr
 
 from teamflow.core.config import settings
+from teamflow.core.prompts import load_prompt as _load_prompt
 
 TriageKind = Literal["simple", "complex"]
 
-DEFAULT_PROMPT_VERSION = "v4"
-PROMPTS_DIR = Path(__file__).resolve().parents[3] / "prompts" / "triage"
+DEFAULT_PROMPT_VERSION = "v5"
 
 
 class TriageResult(BaseModel):
@@ -24,7 +23,7 @@ class Triage(Protocol):
 
 
 def load_prompt(version: str = DEFAULT_PROMPT_VERSION) -> str:
-    return (PROMPTS_DIR / f"triage.{version}.md").read_text(encoding="utf-8")
+    return _load_prompt("triage", version).body
 
 
 class AnthropicTriage:

@@ -1,4 +1,3 @@
-from pathlib import Path
 from typing import Any, Protocol, cast
 
 import structlog
@@ -12,11 +11,11 @@ from pydantic import BaseModel, SecretStr
 from teamflow.agents.tools import SearchProvider, make_tools
 from teamflow.core.config import settings
 from teamflow.core.models import Finding
+from teamflow.core.prompts import load_prompt
 
 log = structlog.get_logger()
 
-DEFAULT_PROMPT_VERSION = "v1"
-PROMPTS_DIR = Path(__file__).resolve().parents[3] / "prompts" / "research"
+DEFAULT_PROMPT_VERSION = "v2"
 
 
 class ResearchAgent(Protocol):
@@ -25,14 +24,6 @@ class ResearchAgent(Protocol):
 
 class _Findings(BaseModel):
     findings: list[Finding]
-
-
-def _load_prompt(version: str) -> str:
-    raw = (PROMPTS_DIR / f"research.{version}.md").read_text(encoding="utf-8")
-    if raw.startswith("---"):
-        _, _, body = raw.split("---", 2)
-        return body.strip()
-    return raw.strip()
 
 
 _EXTRACTOR_SYSTEM = (
@@ -63,7 +54,7 @@ class LangGraphResearchAgent:
     ) -> None:
         self._provider = provider
         self._model = model or settings.default_model
-        self._system_prompt = _load_prompt(prompt_version)
+        self._system_prompt = load_prompt("research", prompt_version).body
         self._max_iterations = max_iterations or settings.research_max_iterations
         self._tools: list[BaseTool] = make_tools(provider)
         self._tools_by_name: dict[str, BaseTool] = {t.name: t for t in self._tools}

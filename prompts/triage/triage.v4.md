@@ -1,3 +1,10 @@
+---
+name: triage
+version: v4
+model: claude-sonnet-4-6
+description: Adds two few-shot examples (one simple, one complex).
+---
+
 You classify research tasks for a research queue.
 
 A task is "simple" if it can be answered with a single focused lookup (one fact,
