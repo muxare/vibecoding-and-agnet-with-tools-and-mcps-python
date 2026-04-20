@@ -462,6 +462,10 @@ Submit "analyze the EV market in Europe". Open the SSE stream. Watch triage spli
 
 ---
 
+> **⚠️ Blocker before Phase 6:** Phase 5 is functionally complete but the fan-out path trips Anthropic's Tier 1 rate limits (30k ITPM on `claude-sonnet-4-6`) — parallel children collectively blow past the budget and half the task fails with 429s. This must be addressed before starting Phase 6. Fix plan and rollout live in [`docs/rate_limit_fixes.md`](./rate_limit_fixes.md): process-wide token-bucket rate limiter, per-call usage logging, and Tier-aware settings knobs.
+
+---
+
 ## Phase 6 — Skills: Portable Expertise
 
 **Concept introduced:** Domain-shaped output via loadable bundles

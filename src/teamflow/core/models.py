@@ -5,6 +5,7 @@ from uuid import UUID, uuid4
 from pydantic import BaseModel, Field
 
 TaskKind = Literal["unknown", "simple", "complex"]
+TaskStatus = Literal["pending", "running", "complete", "failed"]
 
 
 class Finding(BaseModel):
@@ -25,8 +26,12 @@ class HandoffEntry(BaseModel):
 class Task(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     prompt: str
+    status: TaskStatus = "pending"
     kind: TaskKind = "unknown"
     findings: list[Finding] = Field(default_factory=list)
+    subtasks: list[str] = Field(default_factory=list)
+    child_reports: list[str] = Field(default_factory=list)
     report: str = ""
     handoff_log: list[HandoffEntry] = Field(default_factory=list)
+    error: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))

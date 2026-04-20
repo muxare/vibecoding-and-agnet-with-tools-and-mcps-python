@@ -20,4 +20,7 @@ class TeamFlowState(TypedDict, total=False):
     findings: list[Finding]
     report: str
     hops: int
+    depth: int
+    subtasks: list[str]
+    child_reports: Annotated[list[str], add]
     handoff_log: Annotated[list[HandoffLog], add]

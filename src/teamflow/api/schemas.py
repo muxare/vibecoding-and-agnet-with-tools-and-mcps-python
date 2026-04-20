@@ -3,7 +3,7 @@ from uuid import UUID
 
 from pydantic import BaseModel
 
-from teamflow.core.models import Finding, HandoffEntry, TaskKind
+from teamflow.core.models import Finding, HandoffEntry, TaskKind, TaskStatus
 
 
 class CreateTaskRequest(BaseModel):
@@ -13,10 +13,14 @@ class CreateTaskRequest(BaseModel):
 class TaskResponse(BaseModel):
     id: UUID
     prompt: str
+    status: TaskStatus
     kind: TaskKind
     findings: list[Finding]
+    subtasks: list[str]
+    child_reports: list[str]
     report: str
     handoff_log: list[HandoffEntry]
+    error: str | None
     created_at: datetime
 
 

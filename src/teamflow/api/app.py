@@ -8,6 +8,7 @@ from teamflow.agents.tools import TavilySearchProvider
 from teamflow.agents.triage import AnthropicTriage, Triage
 from teamflow.api.routes import router as tasks_router
 from teamflow.core.config import settings
+from teamflow.infrastructure.events import EventBroker
 from teamflow.infrastructure.logging import configure_logging
 from teamflow.infrastructure.repository import InMemoryTaskRepository, TaskRepository
 from teamflow.orchestration.graph import build_graph
@@ -54,6 +55,7 @@ def create_app(
         research=resolved_research,
         synth=resolved_synth,
     )
+    app.state.event_broker = EventBroker()
     app.include_router(tasks_router)
     return app
 

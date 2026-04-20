@@ -9,12 +9,19 @@ from teamflow.core.prompts import load_prompt as _load_prompt
 
 TriageKind = Literal["simple", "complex"]
 
-DEFAULT_PROMPT_VERSION = "v5"
+DEFAULT_PROMPT_VERSION = "v6"
 
 
 class TriageResult(BaseModel):
     kind: TriageKind = Field(
         description="Whether the task is simple (single lookup) or complex (multi-step report)."
+    )
+    subtasks: list[str] = Field(
+        default_factory=list,
+        description=(
+            "For complex tasks: 2–4 self-contained research prompts. "
+            "Empty for simple tasks."
+        ),
     )
 
 

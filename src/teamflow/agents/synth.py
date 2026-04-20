@@ -9,10 +9,13 @@ from teamflow.core.models import Finding
 from teamflow.core.prompts import load_prompt
 
 DEFAULT_PROMPT_VERSION = "v1"
+PARENT_PROMPT_VERSION = "v1"
 
 
 class Synth(Protocol):
     def __call__(self, prompt: str, findings: list[Finding]) -> str: ...
+
+    def synthesize_parent(self, prompt: str, child_reports: list[str]) -> str: ...
 
 
 def _format_findings(findings: list[Finding]) -> str:
@@ -27,15 +30,26 @@ def _format_findings(findings: list[Finding]) -> str:
     return "\n".join(lines)
 
 
+def _format_child_reports(reports: list[str]) -> str:
+    if not reports:
+        return "(no child reports)"
+    blocks = []
+    for i, report in enumerate(reports, start=1):
+        blocks.append(f"<report index=\"{i}\">\n{report}\n</report>")
+    return "\n\n".join(blocks)
+
+
 class AnthropicSynth:
     def __init__(
         self,
         *,
         version: str = DEFAULT_PROMPT_VERSION,
+        parent_version: str = PARENT_PROMPT_VERSION,
         model: str | None = None,
         llm: Any | None = None,
     ) -> None:
         self._system_prompt = load_prompt("synth", version).body
+        self._parent_system_prompt = load_prompt("synth.parent", parent_version).body
         self._model = model or settings.default_model
         self._llm_override: Any | None = llm
         self._llm: Any | None = None
@@ -64,6 +78,19 @@ class AnthropicSynth:
         response = self._get_llm().invoke(
             [
                 SystemMessage(content=self._system_prompt),
+                HumanMessage(content=user),
+            ]
+        )
+        return cast(str, getattr(response, "content", "") or "")
+
+    def synthesize_parent(self, prompt: str, child_reports: list[str]) -> str:
+        user = (
+            f"<task>\n{prompt}\n</task>\n\n"
+            f"<child_reports>\n{_format_child_reports(child_reports)}\n</child_reports>"
+        )
+        response = self._get_llm().invoke(
+            [
+                SystemMessage(content=self._parent_system_prompt),
                 HumanMessage(content=user),
             ]
         )
