@@ -462,7 +462,7 @@ Submit "analyze the EV market in Europe". Open the SSE stream. Watch triage spli
 
 ---
 
-> **⚠️ Blocker before Phase 6:** Phase 5 is functionally complete but the fan-out path trips Anthropic's Tier 1 rate limits (30k ITPM on `claude-sonnet-4-6`) — parallel children collectively blow past the budget and half the task fails with 429s. This must be addressed before starting Phase 6. Fix plan and rollout live in [`docs/rate_limit_fixes.md`](./rate_limit_fixes.md): process-wide token-bucket rate limiter, per-call usage logging, and Tier-aware settings knobs.
+> **✅ Phase 5 rate-limit blocker — resolved (pragmatic path):** The fan-out path originally tripped Anthropic's Tier 1 ITPM limit on `claude-sonnet-4-6`. Resolved on 2026-04-20 by moving all three agents to `claude-haiku-4-5` and setting `CHILD_CONCURRENCY = 1`. Prompt caching on the research system prompt is also in place. The token-bucket limiter / usage logging work described in [`docs/rate_limit_fixes.md`](./rate_limit_fixes.md) was **not** implemented — it would only be needed if research/synth move back to Sonnet or concurrency is raised. In addition, `LangGraphResearchAgent` now catches `GraphRecursionError` from its ReAct loop and extracts findings from whatever was collected, so a tight `recursion_limit` no longer fails the child.
 
 ---
 

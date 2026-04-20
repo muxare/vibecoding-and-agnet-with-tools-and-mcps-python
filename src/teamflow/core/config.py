@@ -6,9 +6,14 @@ class Settings(BaseSettings):
 
     anthropic_api_key: str | None = None
     tavily_api_key: str | None = None
-    default_model: str = "claude-sonnet-4-6"
+    default_model: str = "claude-haiku-4-5"
+    triage_model: str = "claude-haiku-4-5"
     log_level: str = "INFO"
-    research_max_iterations: int = 6
+    research_max_iterations: int = 3
 
 
 settings = Settings()
+
+# Max simultaneous child tasks within one parent. Caps ITPM burstiness from
+# Send-based fan-out; see docs/rate_limiting.md.
+CHILD_CONCURRENCY = 1

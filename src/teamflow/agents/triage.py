@@ -36,7 +36,7 @@ def load_prompt(version: str = DEFAULT_PROMPT_VERSION) -> str:
 class AnthropicTriage:
     def __init__(self, *, version: str = DEFAULT_PROMPT_VERSION, model: str | None = None) -> None:
         self._system_prompt = load_prompt(version)
-        self._model = model or settings.default_model
+        self._model = model or settings.triage_model
         self._classifier: object | None = None
 
     def _get_classifier(self) -> object:

@@ -62,7 +62,7 @@ def make_tools(provider: SearchProvider) -> list[BaseTool]:
             f"{i + 1}. {h.title}\n   {h.url}\n   {h.snippet}" for i, h in enumerate(hits)
         )
 
-    @tool
+    @tool(extras={"cache_control": {"type": "ephemeral"}})
     def web_fetch(url: str) -> str:
         """Fetch the readable text content of a single URL.
 

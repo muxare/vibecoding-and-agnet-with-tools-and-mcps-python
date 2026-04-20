@@ -5,6 +5,7 @@ from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import Runnable
 from langchain_core.tools import BaseTool
+from langgraph.errors import GraphRecursionError
 from langgraph.graph import END, START, MessagesState, StateGraph
 from pydantic import BaseModel, SecretStr
 
@@ -81,7 +82,15 @@ class LangGraphResearchAgent:
             return self._graph
 
         llm_with_tools = self._llm().bind_tools(self._tools)
-        system = SystemMessage(content=self._system_prompt)
+        system = SystemMessage(
+            content=[
+                {
+                    "type": "text",
+                    "text": self._system_prompt,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ]
+        )
 
         def llm_call(state: MessagesState) -> dict[str, Any]:
             response = llm_with_tools.invoke([system, *state["messages"]])
@@ -134,12 +143,31 @@ class LangGraphResearchAgent:
         graph = self._build()
         # recursion_limit caps llm_call ↔ tool_node round trips.
         recursion_limit = max(4, self._max_iterations * 2 + 1)
-        result = graph.invoke(
-            {"messages": [HumanMessage(content=prompt)]},
-            config={"recursion_limit": recursion_limit},
-        )
-        final = result["messages"][-1]
-        notes = getattr(final, "content", "") or ""
+        messages: list[Any] = [HumanMessage(content=prompt)]
+        try:
+            for chunk in graph.stream(
+                {"messages": [HumanMessage(content=prompt)]},
+                config={"recursion_limit": recursion_limit},
+                stream_mode="values",
+            ):
+                messages = chunk["messages"]
+        except GraphRecursionError:
+            log.warning(
+                "research_recursion_limit",
+                limit=recursion_limit,
+                collected=len(messages),
+            )
+        final = messages[-1] if messages else None
+        final_content = getattr(final, "content", "") or ""
+        if isinstance(final_content, str) and final_content.strip():
+            notes = final_content
+        else:
+            parts: list[str] = []
+            for msg in messages[1:]:
+                content = getattr(msg, "content", "") or ""
+                if isinstance(content, str) and content.strip():
+                    parts.append(content)
+            notes = "\n\n".join(parts)
         if not notes:
             return []
         extracted = self._get_extractor().invoke(

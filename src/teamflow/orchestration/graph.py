@@ -1,3 +1,4 @@
+import threading
 from typing import Any
 from uuid import uuid4
 
@@ -9,6 +10,7 @@ from langgraph.types import Send
 from teamflow.agents.research import ResearchAgent
 from teamflow.agents.synth import Synth
 from teamflow.agents.triage import Triage
+from teamflow.core.config import CHILD_CONCURRENCY
 from teamflow.orchestration.state import HandoffLog, TeamFlowState
 
 log = structlog.get_logger()
@@ -18,6 +20,12 @@ MAX_HOPS = 6
 # dispatched at depth=1. With MAX_DEPTH=1, only the root may fan out — child
 # graphs run as flat triage→research→synth chains. Two levels total.
 MAX_DEPTH = 1
+
+# LangGraph runs parallel Send branches in a thread pool when driven by the
+# sync `graph.stream` (see api/routes.py). A threading.Semaphore is the
+# matching primitive; the brief's asyncio.Semaphore would only apply under
+# `ainvoke`.
+_child_semaphore = threading.Semaphore(CHILD_CONCURRENCY)
 
 
 def _build_triage_node(triage: Triage) -> Any:
@@ -202,10 +210,11 @@ def build_graph(
             "depth": depth,
         }
         try:
-            final = child_graph.invoke(
-                substate,
-                config={"configurable": {"thread_id": task_id}},
-            )
+            with _child_semaphore:
+                final = child_graph.invoke(
+                    substate,
+                    config={"configurable": {"thread_id": task_id}},
+                )
             report = final.get("report") or "(empty child report)"
             log.info("child_complete", task_id=task_id, depth=depth, length=len(report))
         except Exception as exc:  # partial-failure policy: keep going
